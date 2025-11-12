@@ -1,5 +1,4 @@
 #include "matmul.h"
-
 #include <sys/time.h>
 #include <string>
 #include <iostream>
