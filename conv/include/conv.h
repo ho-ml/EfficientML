@@ -3,7 +3,7 @@ struct activation {
     int C;
     int H;
     int W;
-    float *data;  // (N, H, W, C)
+    float *data;  // (N, C, H, W)
 };
 
 struct weight {
@@ -46,7 +46,7 @@ namespace conv {
     class Pointwise {
         public:
             void naive_pw(const struct conv_params *params);
-            void pw_nchw(const struct conv_params *params);
+            void pw_nhwc(const struct conv_params *params);
 
         private:
             void check_shape(const struct conv_params *params);
@@ -61,5 +61,6 @@ namespace conv {
             void check_shape(const struct conv_params *params);
     };
 
+    void gemm(const float *A, const float *B, float *C, int M, int N, int K);
     void evaluate(CONV_TYPE type, struct conv_params *params);
 }

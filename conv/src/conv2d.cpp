@@ -35,9 +35,9 @@ namespace conv {
 
         // implementation
         for (n = 0; n < output->N; n++) {
-            for (oh = 0; oh < output->H; oh++) {
-                for (ow = 0; ow < output->W; ow++) {
-                    for (oc = 0; oc < output->C; oc++) {
+            for (oc = 0; oc < output->C; oc++) {
+                for (oh = 0; oh < output->H; oh++) {
+                    for (ow = 0; ow < output->W; ow++) {
                         float acc = 0;
 
                         // K x K convolutions
@@ -48,15 +48,15 @@ namespace conv {
 
                                 if (ih >= 0 && ih < input->H && iw >= 0 && iw < input->W) {
                                     for (ic = 0; ic < input->C; ic++) {
-                                        idx_i = n * (input->H * input->W * input->C) + ih * (input->W * input->C) + iw * input->C + ic;
-                                        idx_k = oc * (kernel->KH * kernel->KW * kernel->Cin) + kh * (kernel->KW * kernel->Cin) + kw * kernel->Cin + ic;
+                                        idx_i = n * (input->C * input->H * input->W) + ic * (input->H * input->W) + ih * input->W + iw;
+                                        idx_k = oc * (kernel->Cin * kernel->KH * kernel->KW) + ic * (kernel->KH * kernel->KW) + kh * kernel->KW + kw;
                                         acc += input_data[idx_i] * kernel_data[idx_k];
                                     }
                                 }
                             }
                         }
 
-                        idx_o = n * (output->H * output->W * output->C) + oh * (output->W * output->C) + ow * output->C + oc;
+                        idx_o = n * (output->C * output->H * output->W) + oc * (output->H * output->W) + oh * output->W + ow;
                         output_data[idx_o] = acc;
                     }
                 }
@@ -64,47 +64,10 @@ namespace conv {
         }
     }
 
-    void mgemm(
-        const float *input, const float *kernel, float *output,
-        const int Cin, const int Hin, const int Win,
-        const int Cout, const int Hout, const int Wout,
-        const int K, const int S, const int P
-    ) {
-        /*
-            implicit gemm implementation
-            - im2col:   (Hout * Wout, K * K * Cin)
-            - kernel:   (Cout, K * K * Cin)
-            - output:   (Hout * Wout, Cout)
-        */
-        
-        // initialize
-        const int ROW = Hout * Wout;
-        const int COL = K * K * Cin;
-        int oc, oh, ow, kh, kw, ic, ih, iw;
-        
-        // implementation
-        for (int col = 0; col < COL; col++) {
-            kh = col / (K * Cin);
-            kw = (col % (K * Cin)) / Cin;
-            ic = col % Cin;
-
-            for (int row = 0; row < ROW; row++) {
-                // indexing
-                oh = row / Wout; ow = row % Wout;
-                ih = oh * S - P + kh; iw = ow * S - P + kw;
-                
-                // multiplication
-                if (ih >= 0 && ih < Hin && iw >= 0 && iw < Win) {
-                    for (oc = 0; oc < Cout; oc++)
-                        output[row * Cout + oc] += input[ih * (Win * Cin) + iw * Cin + ic] * kernel[oc * COL + col];
-                }
-            }
-        }
-    }
-
     void Conv2d::conv_im2col(const struct conv_params *params) {
         // initialize
-        int n;
+        int n, oc, oh, ow, ic, ih, iw, kh, kw;
+        int buffer_idx, input_idx, ridx, cidx;
 
         const struct activation *input = &params->input, *output = &params->output;
         const struct weight *kernel = &params->kernel;
@@ -115,25 +78,56 @@ namespace conv {
 
         // sanity check
         check_shape(params);
-        
-        // clear output
-        for (n = 0; n < output->N * output->H * output->W * output->C; n++)
-            output_data[n] = 0;
+
+        // gemm matrix dimension
+        // kernel: (Cout, Cin * KH * KW)
+        // im2col: (Cin * KH * KW, Hout * Wout)
+        // output: (Cout, Hout * Wout)
+        int M_gemm = output->C;
+        int K_gemm = kernel->Cin * kernel->KH * kernel->KW;
+        int N_gemm = output->H * output->W;
+        float *col_buffer = new float[K_gemm * N_gemm];
 
         // implementation
         for (n = 0; n < output->N; n++) {
-            // move pointers
-            float *input_batch = input_data + n * (input->H * input->W * input->C);
-            float *output_batch = output_data + n * (output->H * output->W * output->C);
+            const float *input_batch = input_data + n * (input->C * input->H * input->W);
 
-            // implicit gemm
-            mgemm(
-                input_batch, kernel_data, output_batch,
-                input->C, input->H, input->W,
-                output->C, output->H, output->W,
-                config->kernel_size, config->stride, config->padding
-            );
+            // transform image to column matrix
+            cidx = 0;
+            for (oh = 0; oh < output->H; oh++) {
+                for (ow = 0; ow < output->W; ow++) {
+                    ridx = 0;
+
+                    for (ic = 0; ic < input->C; ic++) {
+                        for (kh = 0; kh < kernel->KH; kh++) {
+                            for (kw = 0; kw < kernel->KW; kw++) {
+                                ih = oh * config->stride - config->padding + kh;
+                                iw = ow * config->stride - config->padding + kw;
+                                buffer_idx = ridx * N_gemm + cidx;
+
+                                if (ih >= 0 && ih < input->H && iw >= 0 && iw < input->W) {
+                                    input_idx = ic * (input->H * input->W) + ih * input->W + iw;
+                                    col_buffer[buffer_idx] = input_batch[input_idx];
+                                }
+                                else {
+                                    col_buffer[buffer_idx] = 0.0f;
+                                }
+
+                                ridx++;
+                            }
+                        }
+                    }
+
+                    cidx++;
+                }
+            }
+
+            // gemm (gemm.cpp에서 구현)
+            float *output_batch = output_data + n * (output->C * output->H * output->W);
+            gemm(kernel_data, col_buffer, output_batch, M_gemm, N_gemm, K_gemm);
         }
 
+        // free the buffer
+        delete[] col_buffer;
     }
 }
