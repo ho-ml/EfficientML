@@ -1,0 +1,3 @@
+[submodule "lab/lab5/tinychat-tutorial"]
+	path = lab/lab5/tinychat-tutorial
+	url = https://github.com/ho-ml/tinychat-tutorial.git
